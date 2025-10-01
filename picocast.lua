@@ -311,6 +311,7 @@ end
 
 -- ===== init & update =====
 function _init()
+    palt(0,false)
   -- srand(t()) -- uncomment for different layout per boot/session
   build_texture_atlas_in_map(num_textures)
   build_level()
