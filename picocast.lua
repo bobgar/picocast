@@ -1,10 +1,7 @@
 -- pico-8 raycaster
--- doors: one per hallway at room exits, slide open left/right, longer open time
--- small circle projectiles
--- enemy A* pathing (bounded window, throttled)
--- exit billboard lowered slightly (not fully grounded)
--- near-wall stretch fix kept
--- NO scientific notation; BIG values use <=32767
+-- exit room has single locked entrance; key in reachable room away from start & gate
+-- enemies open normal doors on path; melee cadence; A* budgeted per frame
+-- no scientific notation; 16-bit-safe constants
 
 scr_w,scr_h=128,128
 half_h=64
@@ -18,24 +15,28 @@ rot_spd=2.7/360
 
 -- textures: 32x32 (4x4 tiles)
 tex_w,tex_h=32,32
-span=tex_w/8 -- 4 tiles across
+span=tex_w/8
 
--- wall variants start at sprite tile #1 (sprite #0 is blank)
+-- walls (sprite #0 blank; use >=1)
 WALL_SRC0=1
 WALL_SRC1=1+span
 WALL_SRC2=1+span*2
 
--- door sprite top-left tile (32x32)
+-- doors (32x32)
 DOOR_SRC=64
--- exit (32x32 billboard)
+LOCKED_DOOR_SRC=76
+
+-- exit + key (32x32)
 EXIT_SPR=68
+KEY_SPR=72
 
 -- atlas row for tline sampling
 atlas_ay=0
 
--- door params
+-- door constants
 DOOR_CODE=9
-DOOR_OPEN_TIME=420  -- longer
+LOCKED_DOOR_CODE=10
+DOOR_OPEN_TIME=420
 USE_RADIUS=1.0
 DOOR_ANIM_FRAMES=30
 
@@ -46,25 +47,29 @@ col_proj_en=8
 col_proj_pl=10
 col_hitfx=8
 
--- world
+-- world & player
 W,H=50,50
 lvlz=1
 level={}
 rooms={}
 centers={}
-doors={}      -- {x,y,open,anim(0..1),timer}
-door_map={}   -- "x,y"->index
-player={x=3.5,y=3.5,a=0,hp=3,hurt_cd=0,fire_cd=0}
-game_state=0  -- 0=play,1=win,2=dead
+doors={}      -- {x,y,open,anim,timer,locked,removed}
+door_map={}
+player={x=3.5,y=3.5,a=0,hp=3,hurt_cd=0,fire_cd=0,has_key=false}
+game_state=0  -- 0 play,1 win,2 dead
 exit_ix,exit_iy=47,47
+key_ent=nil   -- {x,y,got}
 
--- enemies & projectiles
-enemies={}       -- {x,y,t(0 melee/1 ranged), spd, r, cd, hp, los, los_cd, had_los, path, path_i, repath_cd}
-projectiles={}   -- {x,y,dx,dy,spd,life,from(0=en,1=pl)}
+-- enemies, projectiles
+enemies={}    -- {x,y,t,spd,r,cd,hp,los,los_cd,had_los,path,path_i,repath_cd,mcd}
+projectiles={}-- {x,y,dx,dy,spd,life,from}
 
--- enemy sprites (32x32 blocks) starting at tile 128
+-- enemy sprites (32x32 blocks)
 SPR_MELEE=128
 SPR_RANGED=128+4
+
+-- per-frame A* budget (perf)
+plan_budget=1
 
 -- ===== utils =====
 function irnd(a,b) return flr(rnd(b-a+1))+a end
@@ -74,12 +79,20 @@ function setcell(x,y,v) if x>=1 and y>=1 and x<=W and y<=H then level[lvlz][y][x
 function cell_center_world(i) return i-0.5 end
 function dist(a,b,c,d) return sqrt((a-c)^2+(b-d)^2) end
 function dkey(x,y) return x..","..y end
-function door_at(ix,iy) local i=door_map[dkey(ix,iy)] if i then return doors[i] end end
+function is_in_room(r,x,y) return x>=r.x and x<=r.x+r.w and y>=r.y and y<=r.y+r.h end
+
+function door_at(ix,iy)
+  local i=door_map[dkey(ix,iy)]
+  if i then
+    local d=doors[i]
+    if d and not d.removed and d.x==ix and d.y==iy then return d end
+  end
+end
 
 -- solid test (doors solid unless fully open)
 function solid_cell(ix,iy)
   local t=cell(ix,iy)
-  if t==DOOR_CODE then
+  if t==DOOR_CODE or t==LOCKED_DOOR_CODE then
     local d=door_at(ix,iy)
     if d and d.anim>=1 then return false end
   end
@@ -87,14 +100,19 @@ function solid_cell(ix,iy)
 end
 function solid_at_world(x,y) return solid_cell(flr(x)+1, flr(y)+1) end
 
--- passability for pathfinding (open door counts as passable)
-function passable(ix,iy)
+-- pathability
+function passable_player_bfs(ix,iy)
   local t=cell(ix,iy)
   if t==0 then return true end
   if t==DOOR_CODE then
-    local d=door_at(ix,iy)
-    return d and d.anim>=1
+    local d=door_at(ix,iy) return d and d.anim>=1
   end
+  return false
+end
+function passable_ai(ix,iy)
+  local t=cell(ix,iy)
+  if t==0 then return true end
+  if t==DOOR_CODE then return true end
   return false
 end
 
@@ -204,7 +222,7 @@ local function choose_exit(sx,sy)
   exit_ix,exit_iy=fx,fy
 end
 
--- classify corridor orientation (strict straight)
+-- corridor orientation (strict straight)
 local function corridor_ori(ix,iy)
   local u=cell(ix,iy-1)==0
   local d=cell(ix,iy+1)==0
@@ -215,7 +233,6 @@ local function corridor_ori(ix,iy)
   return nil
 end
 
--- adjacency check for "room-like" (not strict corridor cell)
 local function adj_non_corridor(ix,iy)
   local dirs={{1,0},{-1,0},{0,1},{0,-1}}
   for d in all(dirs) do
@@ -225,27 +242,21 @@ local function adj_non_corridor(ix,iy)
   return false
 end
 
--- place exactly one door per corridor RUN, at an end that touches a room (not mid-run)
+-- place one normal door per corridor run at the room end
 function place_doors_at_room_exits()
   doors={} door_map={}
   local vis={}
   for y=1,H do local row={} for x=1,W do row[x]=false end vis[y]=row end
-
   for y=2,H-1 do
     for x=2,W-1 do
       if cell(x,y)==0 and not vis[y][x] then
         local ori=corridor_ori(x,y)
         if ori then
-          -- collect contiguous straight run
           local seg={}
-          -- find start (walk backwards until break)
           local bdx,bdy=(ori=='h') and -1 or 0, (ori=='v') and -1 or 0
           local cx,cy=x,y
-          while cell(cx,cy)==0 and corridor_ori(cx,cy)==ori do
-            cx-=bdx cy-=bdy
-          end
+          while cell(cx,cy)==0 and corridor_ori(cx,cy)==ori do cx-=bdx cy-=bdy end
           cx+=bdx cy+=bdy
-          -- forward collect
           local fdx,fdy=(ori=='h') and 1 or 0, (ori=='v') and 1 or 0
           while cell(cx,cy)==0 and corridor_ori(cx,cy)==ori and not vis[cy][cx] do
             add(seg,{x=cx,y=cy})
@@ -260,13 +271,10 @@ function place_doors_at_room_exits()
             local pick=nil
             if end1_ok and not end2_ok then pick=s1
             elseif end2_ok and not end1_ok then pick=s2
-            elseif end1_ok and end2_ok then
-              -- pick deterministic: the end closer to run midpoint (keeps single door)
-              pick=s1
-            end
+            elseif end1_ok and end2_ok then pick=s1 end
             if pick and not (pick.x==exit_ix and pick.y==exit_iy) then
               setcell(pick.x,pick.y,DOOR_CODE)
-              local d={x=pick.x,y=pick.y,open=false,anim=0,timer=0}
+              local d={x=pick.x,y=pick.y,open=false,anim=0,timer=0,locked=false,removed=false}
               add(doors,d)
               door_map[dkey(pick.x,pick.y)]=#doors
             end
@@ -276,6 +284,136 @@ function place_doors_at_room_exits()
         end
       end
     end
+  end
+end
+
+-- ===== enforce: exit room has a single locked entrance =====
+local function find_exit_room()
+  for r in all(rooms) do
+    if is_in_room(r,exit_ix,exit_iy) then return r end
+  end
+end
+
+local function remove_door(ix,iy)
+  local k=dkey(ix,iy)
+  local di=door_map[k]
+  if di then
+    doors[di].removed=true
+    door_map[k]=nil
+  end
+end
+
+-- gather corridor cells that touch exit room boundary
+local function exit_room_entries(r)
+  local entries={}
+  for y=r.y-1,r.y+r.h+1 do
+    for x=r.x-1,r.x+r.w+1 do
+      if x>=2 and y>=2 and x<=W-1 and y<=H-1 then
+        if cell(x,y)==0 and corridor_ori(x,y)~=nil then
+          -- touching room interior?
+          local touch=false
+          if is_in_room(r,x+1,y) or is_in_room(r,x-1,y) or is_in_room(r,x,y+1) or is_in_room(r,x,y-1) then
+            touch=true
+          end
+          if touch then add(entries,{x=x,y=y}) end
+        end
+      end
+    end
+  end
+  return entries
+end
+
+-- choose entry far from start to be the locked gate; seal others
+local function lock_exit_room_single_entry(startx,starty)
+  local r=find_exit_room()
+  if not r then return nil end
+  local ents=exit_room_entries(r)
+  if #ents==0 then return nil end
+
+  -- pick farthest from start
+  local bi=1 local bd=-1
+  for i=1,#ents do
+    local e=ents[i]
+    local d=abs(e.x-startx)+abs(e.y-starty)
+    if d>bd then bd=d bi=i end
+  end
+  local gate=ents[bi]
+
+  -- convert/upgrade to locked door
+  local k=dkey(gate.x,gate.y)
+  local di=door_map[k]
+  if di then
+    doors[di].locked=true doors[di].removed=false
+    setcell(gate.x,gate.y,LOCKED_DOOR_CODE)
+  else
+    setcell(gate.x,gate.y,LOCKED_DOOR_CODE)
+    local d={x=gate.x,y=gate.y,open=false,anim=0,timer=0,locked=true,removed=false}
+    add(doors,d) door_map[k]=#doors
+  end
+
+  -- seal other entries
+  for i=1,#ents do
+    if i~=bi then
+      local e=ents[i]
+      setcell(e.x,e.y,1)
+      remove_door(e.x,e.y)
+    end
+  end
+
+  return gate
+end
+
+-- ===== BFS reachability avoiding locked doors, then key placement =====
+local function reachable_from(startx,starty)
+  local rs={}
+  for y=1,H do rs[y]={} end
+  local q={{x=startx,y=starty}} local head=1
+  rs[starty][startx]=true
+  while head<=#q do
+    local c=q[head] head+=1
+    local dirs={{1,0},{-1,0},{0,1},{0,-1}}
+    for d in all(dirs) do
+      local nx,ny=c.x+d[1],c.y+d[2]
+      if nx>=1 and ny>=1 and nx<=W and ny<=H and not rs[ny][nx] and passable_player_bfs(nx,ny) then
+        rs[ny][nx]=true add(q,{x=nx,y=ny})
+      end
+    end
+  end
+  return rs
+end
+
+local function place_key_in_reachable_room(startx,starty,gatex,gatey)
+  local rs=reachable_from(startx,starty)
+  local best=nil local bestscore=-1
+  local min_start=8  -- at least this far from start
+  local min_gate=8   -- and from gate
+  for r in all(rooms) do
+    for y=r.y+1,r.y+r.h-1 do
+      for x=r.x+1,r.x+r.w-1 do
+        if rs[y][x] and cell(x,y)==0 then
+          local ds=abs(x-startx)+abs(y-starty)
+          local dg=abs(x-gatex)+abs(y-gatey)
+          if ds>=min_start and dg>=min_gate then
+            local score=min(ds,dg) + (rnd()*0.25) -- break ties
+            if score>bestscore then bestscore=score best={x=x,y=y} end
+          end
+        end
+      end
+    end
+  end
+  if not best then
+    -- fallback: farthest reachable floor from start
+    for y=2,H-1 do
+      for x=2,W-1 do
+        if rs[y][x] and cell(x,y)==0 then
+          local s=abs(x-startx)+abs(y-starty)
+          if s>bestscore then bestscore=s best={x=x,y=y} end
+        end
+      end
+    end
+  end
+  if best then
+    key_ent={x=cell_center_world(best.x),y=cell_center_world(best.y),got=false}
   end
 end
 
@@ -294,26 +432,25 @@ function spawn_enemies()
     local rid=irnd(1,#rooms)
     local rx,ry=random_pos_in_room(rooms[rid])
     if rx and dist(rx,ry,player.x,player.y)>8 then
-      add(enemies,{x=rx,y=ry,t=0,spd=0.045,r=0.18,cd=0,hp=3,los=false,los_cd=0,had_los=false,repath_cd=0})
+      add(enemies,{x=rx,y=ry,t=0,spd=0.045,r=0.18,cd=0,hp=3,los=false,los_cd=0,had_los=false,repath_cd=0,mcd=0})
     end
   end
   for i=1,4 do
     local rid=irnd(1,#rooms)
     local rx,ry=random_pos_in_room(rooms[rid])
     if rx and dist(rx,ry,player.x,player.y)>10 then
-      add(enemies,{x=rx,y=ry,t=1,spd=0.038,r=0.18,cd=0,hp=2,los=false,los_cd=0,had_los=false,repath_cd=0})
+      add(enemies,{x=rx,y=ry,t=1,spd=0.038,r=0.18,cd=0,hp=2,los=false,los_cd=0,had_los=false,repath_cd=0,mcd=0})
     end
   end
 end
 
 function build_level()
-  -- fill walls
+  -- walls everywhere
   local slice={}
   for y=1,H do local row={} for x=1,W do row[x]=1 end slice[y]=row end
   level={[lvlz]=slice}
 
   rooms={} centers={}
-  -- moderate rooms for perf
   local max_rooms=16 local tries=0
   while #rooms<max_rooms and tries<500 do
     tries+=1
@@ -340,10 +477,16 @@ function build_level()
   for i=1,#centers do local c=centers[i] local d=manhattan(c.x,c.y,3,3) if d<bd then bd=d bi=i end end
   local s=centers[bi]
   player.x=cell_center_world(s.x) player.y=cell_center_world(s.y)
-  player.hp=3 player.hurt_cd=0 player.fire_cd=0
+  player.hp=3 player.hurt_cd=0 player.fire_cd=0 player.has_key=false
 
   choose_exit(s.x,s.y)
   place_doors_at_room_exits()
+
+  -- enforce single locked entrance to the exit room
+  local gate=lock_exit_room_single_entry(s.x,s.y) or {x=exit_ix,y=exit_iy}
+  -- place a key reachable without crossing the locked gate
+  place_key_in_reachable_room(s.x,s.y,gate.x,gate.y)
+
   spawn_enemies()
   projectiles={}
 end
@@ -397,20 +540,18 @@ function move_circle(x,y,dx,dy,r)
   return x,y
 end
 
--- ===== A* pathfinding (bounded window, 4-neigh) =====
+-- ===== A* (bounded, budgeted) =====
 function astar(sx,sy,tx,ty,rad,max_iter)
-  rad=rad or 12
-  max_iter=max_iter or 600
+  rad=rad or 100
+  max_iter=max_iter or 6000
   local minx=max(1,min(sx,tx)-rad)
   local maxx=min(W,max(sx,tx)+rad)
   local miny=max(1,min(sy,ty)-rad)
   local maxy=min(H,max(sy,ty)+rad)
   local w=maxx-minx+1
   local h=maxy-miny+1
-
   local function inb(x,y) return x>=minx and y>=miny and x<=maxx and y<=maxy end
   if not inb(tx,ty) or not inb(sx,sy) then return nil end
-  -- local indexing
   local function lx(x) return x-minx+1 end
   local function ly(y) return y-miny+1 end
 
@@ -428,49 +569,44 @@ function astar(sx,sy,tx,ty,rad,max_iter)
   local it=0
   while #open>0 and it<max_iter do
     it+=1
-    -- find lowest f
     local bi=1
     for i=2,#open do if open[i].f<open[bi].f then bi=i end end
     local cur=open[bi]
     deli(open,bi)
-    if closed[cur.y][cur.x] then goto cont end
-    closed[cur.y][cur.x]=true
-
-    if cur.x==txl and cur.y==tyl then
-      -- reconstruct
-      local path={}
-      local cx,cy=cur.x,cur.y
-      while not (cx==ox and cy==oy) do
-        add(path,{x=cx+minx-1,y=cy+miny-1})
-        local nx=px[cy][cx] local ny=py[cy][cx]
-        cx,cy=nx,ny
+    if not closed[cur.y][cur.x] then
+      closed[cur.y][cur.x]=true
+      if cur.x==txl and cur.y==tyl then
+        local path={}
+        local cx,cy=cur.x,cur.y
+        while not (cx==ox and cy==oy) do
+          add(path,{x=cx+minx-1,y=cy+miny-1},1)
+          local nx=px[cy][cx] local ny=py[cy][cx]
+          cx,cy=nx,ny
+        end
+        return path
       end
-      -- path now from next step -> goal
-      return path
-    end
-
-    local dirs={{1,0},{-1,0},{0,1},{0,-1}}
-    for d in all(dirs) do
-      local nx,ny=cur.x+d[1], cur.y+d[2]
-      if nx>=1 and ny>=1 and nx<=w and ny<=h and not closed[ny][nx] then
-        local gx,gy=nx+minx-1, ny+miny-1
-        if passable(gx,gy) then
-          local tg=cur.g+1
-          if tg < g[ny][nx] then
-            g[ny][nx]=tg
-            px[ny][nx]=cur.x py[ny][nx]=cur.y
-            local f=tg + abs(nx-txl)+abs(ny-tyl)
-            add(open,{x=nx,y=ny,g=tg,f=f})
+      local dirs={{1,0},{-1,0},{0,1},{0,-1}}
+      for d in all(dirs) do
+        local nx,ny=cur.x+d[1], cur.y+d[2]
+        if nx>=1 and ny>=1 and nx<=w and ny<=h and not closed[ny][nx] then
+          local gx,gy=nx+minx-1, ny+miny-1
+          if passable_ai(gx,gy) then
+            local tg=cur.g+1
+            if tg < g[ny][nx] then
+              g[ny][nx]=tg
+              px[ny][nx]=cur.x py[ny][nx]=cur.y
+              local f=tg + abs(nx-txl)+abs(ny-tyl)
+              add(open,{x=nx,y=ny,g=tg,f=f})
+            end
           end
         end
       end
     end
-    ::cont::
   end
   return nil
 end
 
--- ===== DDA LOS (open doors transparent) =====
+-- ===== DDA LOS =====
 function los_dda(ax,ay,bx,by,limit)
   local rdx, rdy = bx-ax, by-ay
   local len=max(0.0001,sqrt(rdx*rdx+rdy*rdy))
@@ -488,7 +624,7 @@ function los_dda(ax,ay,bx,by,limit)
     local ix,iy=mapx+1,mapy+1
     local t=cell(ix,iy)
     if t>0 then
-      if t==DOOR_CODE then
+      if t==DOOR_CODE or t==LOCKED_DOOR_CODE then
         local d=door_at(ix,iy)
         if not (d and d.anim>=1) then return false end
       else
@@ -500,31 +636,45 @@ function los_dda(ax,ay,bx,by,limit)
   return true
 end
 
--- ===== doors: use/open/animate/auto-close (never close on top of actors) =====
-function use_nearby_door()
+-- ===== doors =====
+function door_slot(ix,iy)
+  return (cell(ix,iy)==LOCKED_DOOR_CODE) and 4 or 3
+end
+
+function open_door_tile(ix,iy,allow_locked)
+  local d=door_at(ix,iy)
+  if not d or d.removed then return false end
+  if d.locked and not allow_locked then return false end
+  d.open=true d.timer=DOOR_OPEN_TIME
+  return true
+end
+
+function try_open_door_at(x,y,require_key)
   local best_i=-1 local best_d=30000
   for i=1,#doors do
     local d=doors[i]
-    if not d.open or d.anim<1 then
+    if not d.removed and (not d.open or d.anim<1) then
       local wx,wy=cell_center_world(d.x),cell_center_world(d.y)
-      local dd=dist(wx,wy,player.x,player.y)
+      local dd=dist(wx,wy,x,y)
       if dd<USE_RADIUS and dd<best_d then best_d=dd best_i=i end
     end
   end
-  if best_i==-1 then return end
+  if best_i==-1 then return false end
   local d=doors[best_i]
+  if d.locked and require_key and not player.has_key then return false end
   d.open=true d.timer=DOOR_OPEN_TIME
+  return true
 end
 
 function update_doors()
   local step=1/DOOR_ANIM_FRAMES
   for d in all(doors) do
-    if d.open then
+    if d.removed then
+    elseif d.open then
       if d.anim<1 then d.anim=min(1,d.anim+step) end
       if d.timer>0 then d.timer-=1 end
       if d.timer<=0 then
         local wx,wy=cell_center_world(d.x),cell_center_world(d.y)
-        -- never close on top of player/enemies
         if dist(wx,wy,player.x,player.y)>0.45 then
           local clear=true
           for e in all(enemies) do if dist(wx,wy,e.x,e.y)<0.45 then clear=false break end end
@@ -557,7 +707,7 @@ function move_projectile(pr)
   return false
 end
 
--- ===== enemies & player fire (w/ A*) =====
+-- ===== enemies =====
 function player_fire()
   if player.fire_cd>0 then return end
   local dirx,diry=cos(player.a),sin(player.a)
@@ -566,18 +716,39 @@ function player_fire()
   player.fire_cd=10
 end
 
+function enemy_try_open_doors(e)
+  -- nearby normal doors
+  local best_i=-1 local best_d=30000
+  for i=1,#doors do
+    local d=doors[i]
+    if not d.removed and (not d.locked) and (not d.open or d.anim<1) then
+      local wx,wy=cell_center_world(d.x),cell_center_world(d.y)
+      local dd=dist(wx,wy,e.x,e.y)
+      if dd<1.0 and dd<best_d then best_d=dd best_i=i end
+    end
+  end
+  if best_i~=-1 then local d=doors[best_i] d.open=true d.timer=DOOR_OPEN_TIME end
+end
+
 function follow_path(e)
   if not e.path or #e.path==0 or not e.path_i then return false end
   if e.path_i>#e.path then return false end
   local node=e.path[e.path_i]
-  local wx,wy=cell_center_world(node.x),cell_center_world(node.y)
+  local nx,ny=node.x,node.y
+  local t=cell(nx,ny)
+  if t==DOOR_CODE then
+    local wx,wy=cell_center_world(nx),cell_center_world(ny)
+    if dist(wx,wy,e.x,e.y)<1.0 then open_door_tile(nx,ny,false) end
+  end
+  local wx,wy=cell_center_world(nx),cell_center_world(ny)
   local dx,dy=wx-e.x, wy-e.y
   local d=sqrt(dx*dx+dy*dy)
   if d<0.1 then
     e.path_i+=1
     if e.path_i>#e.path then return false end
     node=e.path[e.path_i]
-    wx,wy=cell_center_world(node.x),cell_center_world(node.y)
+    nx,ny=node.x,node.y
+    wx,wy=cell_center_world(nx),cell_center_world(ny)
     dx,dy=wx-e.x, wy-e.y
     d=sqrt(dx*dx+dy*dy)
   end
@@ -591,10 +762,13 @@ end
 
 function replan_to_player(e)
   if e.repath_cd>0 then e.repath_cd-=1 return end
-  e.repath_cd=12
+  if not e.had_los and (not e.path) then return end
+  if plan_budget<=0 then return end
+  plan_budget-=1
+  e.repath_cd=18
   local sx,sy=flr(e.x)+1, flr(e.y)+1
   local tx,ty=flr(player.x)+1, flr(player.y)+1
-  local p=astar(sx,sy,tx,ty,12,600)
+  local p=astar(sx,sy,tx,ty,100,6000)
   if p then e.path=p e.path_i=1 end
 end
 
@@ -606,48 +780,40 @@ function update_enemies()
     local d=max(0.0001,sqrt(d2))
     local ux,uy=dx/d,dy/d
 
-    -- LOS throttled
     if e.los_cd<=0 then
-      if d2 < 196 then
-        e.los = los_dda(e.x,e.y,player.x,player.y,256)
-      else
-        e.los = false
-      end
+      if d2 < 196 then e.los = los_dda(e.x,e.y,player.x,player.y,256) else e.los=false end
       if e.los then e.had_los=true end
       e.los_cd = e.los and 2 or 4
     else
       e.los_cd -= 1
     end
 
+    enemy_try_open_doors(e)
+
     if e.t==0 then
       if e.los then
-        -- melee rush
         e.path=nil
         e.x,e.y=move_circle(e.x,e.y,ux*e.spd,uy*e.spd,e.r)
-        if d<0.55 and player.hurt_cd<=0 then
+      else
+        if e.had_los then if (not follow_path(e)) then replan_to_player(e) end end
+      end
+      if e.mcd>0 then e.mcd-=1 end
+      if d<0.75 and e.mcd<=0 then
+        if player.hurt_cd<=0 then
           player.hp-=1 player.hurt_cd=30
           if player.hp<=0 then game_state=2 end
         end
-      else
-        if e.had_los then
-          if (not follow_path(e)) then replan_to_player(e) end
-        end
+        e.mcd=14
       end
     else
-      -- ranged
       if e.los then
         e.path=nil
         if d>6 then e.x,e.y=move_circle(e.x,e.y,ux*e.spd,uy*e.spd,e.r)
         elseif d<2 then e.x,e.y=move_circle(e.x,e.y,-ux*e.spd,-uy*e.spd,e.r) end
         if e.cd>0 then e.cd-=1 end
-        if d<12 and e.cd<=0 then
-          spawn_projectile(e.x,e.y,player.x,player.y,0)
-          e.cd=52
-        end
+        if d<12 and e.cd<=0 then spawn_projectile(e.x,e.y,player.x,player.y,0) e.cd=52 end
       else
-        if e.had_los then
-          if (not follow_path(e)) then replan_to_player(e) end
-        end
+        if e.had_los then if (not follow_path(e)) then replan_to_player(e) end end
       end
     end
 
@@ -674,23 +840,22 @@ function update_projectiles()
       else
         for ei=#enemies,1,-1 do
           local e=enemies[ei]
-          if dist(pr.x,pr.y,e.x,e.y) < e.r+0.25 then
-            e.hp-=1 deli(projectiles,i) break
-          end
+          if dist(pr.x,pr.y,e.x,e.y) < e.r+0.25 then e.hp-=1 deli(projectiles,i) break end
         end
       end
     end
   end
 end
 
--- ===== init & update =====
+-- ===== init & main loop =====
 function _init()
-  -- srand(t()) -- uncomment for new layout each boot
-  build_atlas_from_sources({WALL_SRC0,WALL_SRC1,WALL_SRC2,DOOR_SRC})
+  -- srand(t()) -- enable for fresh layout each boot
+  build_atlas_from_sources({WALL_SRC0,WALL_SRC1,WALL_SRC2,DOOR_SRC,LOCKED_DOOR_SRC})
   build_level()
 end
 
 function _update60()
+  plan_budget=1 -- at most one A* per frame
   if game_state~=0 then
     if btnp(4) or btnp(5) then build_level() game_state=0 end
     return
@@ -704,14 +869,19 @@ function _update60()
   if player.a<0 then player.a+=1 end
   if player.a>=1 then player.a-=1 end
 
-  if btnp(5) then player_fire() end      -- ❎ shoot
-  if btnp(4) then use_nearby_door() end  -- 🅾️ open door
+  if btnp(5) then player_fire() end
+  if btnp(4) then try_open_door_at(player.x,player.y,true) end
 
   local dirx,diry=cos(player.a),sin(player.a)
   local dx,dy=0,0
   if btn(2) then dx+=dirx*move_spd dy+=diry*move_spd end
   if btn(3) then dx-=dirx*move_spd dy-=diry*move_spd end
   if dx~=0 or dy~=0 then player.x,player.y=move_circle(player.x,player.y,dx,dy,0.18) end
+
+  -- key pickup
+  if key_ent and not key_ent.got then
+    if dist(player.x,player.y,key_ent.x,key_ent.y)<0.45 then key_ent.got=true player.has_key=true end
+  end
 
   update_doors()
   update_enemies()
@@ -721,9 +891,9 @@ function _update60()
   if abs(player.x-ex)<0.4 and abs(player.y-ey)<0.4 then game_state=1 end
 end
 
--- ===== renderer (see-through opening doors, horizontal split overlay) =====
+-- ===== renderer (unchanged except door overlay & billboards) =====
 zbuf={}
-local door_overlay={} -- per-column overlay info: {perp, tex_x, anim}
+local door_overlay={}
 
 function draw_scene()
   local dirx,diry=cos(player.a),sin(player.a)
@@ -756,7 +926,7 @@ function draw_scene()
       if sdx<sdy then sdx+=ddx mapx+=stepx side=0 else sdy+=ddy mapy+=stepy side=1 end
       local ix,iy=mapx+1,mapy+1
       local t=cell(ix,iy)
-      if t==DOOR_CODE then
+      if t==DOOR_CODE or t==LOCKED_DOOR_CODE then
         local d=door_at(ix,iy)
         if d then
           local perp=(side==0) and (sdx-ddx) or (sdy-ddy)
@@ -774,15 +944,14 @@ function draw_scene()
           local tex_x=flr(wallx*tex_w)
           if (side==0 and rdx>0) or (side==1 and rdy<0) then tex_x=tex_w-1-tex_x end
           tex_x=mid(0,tex_x,tex_w-1)
-
           if d.anim>0 then
+            local ubase=(t==LOCKED_DOOR_CODE) and 4 or 3
             local ov=door_overlay[x]
             if (not ov) or (perp<ov.perp) then
-              door_overlay[x]={perp=perp, tex_x=tex_x, anim=d.anim}
+              door_overlay[x]={perp=perp, tex_x=tex_x, anim=d.anim, ubase=ubase*span}
             end
-            -- continue to background
           else
-            hit_val=DOOR_CODE -- fully closed -> block
+            hit_val=t
           end
         end
       elseif t>0 then
@@ -798,7 +967,6 @@ function draw_scene()
       local line_h=flr(scr_h/perp)
       local draw_start=half_h - line_h\2
       local draw_end  =draw_start + line_h - 1
-
       local wallx
       if side==0 then
         local dx=(mapx - player.x + (1-stepx)/2)
@@ -812,15 +980,13 @@ function draw_scene()
       local tex_x=flr(wallx*tex_w)
       if (side==0 and rdx>0) or (side==1 and rdy<0) then tex_x=tex_w-1-tex_x end
       tex_x=mid(0,tex_x,tex_w-1)
-
       local tex_sel
-      if hit_val==DOOR_CODE then
-        tex_sel=3
+      if hit_val==DOOR_CODE then tex_sel=3
+      elseif hit_val==LOCKED_DOOR_CODE then tex_sel=4
       else
         local mxv=max(0,mapx) local myv=max(0,mapy)
         tex_sel = (side==0) and (mxv%3) or (myv%3)
       end
-
       local ys = clamp(draw_start,0,scr_h-1)
       local ye = clamp(draw_end,0,scr_h-1)
       if ye>ys then
@@ -833,7 +999,7 @@ function draw_scene()
     end
   end
 
-  -- overlay opening doors (horizontal split: gap widens from center)
+  -- overlay opening doors
   for x=0,127 do
     local ov=door_overlay[x]
     if ov then
@@ -841,7 +1007,6 @@ function draw_scene()
       local line_h=flr(scr_h/perp)
       local draw_start=half_h - line_h\2
       local draw_end=draw_start + line_h - 1
-
       local midx=tex_w/2
       local gap_half=flr(ov.anim*midx)
       if abs(ov.tex_x - midx) >= gap_half then
@@ -850,7 +1015,7 @@ function draw_scene()
         if ye>ys then
           local step_px = tex_h/line_h
           local tex_pos = (ys - (half_h - line_h/2)) * step_px
-          local u=3*span + ov.tex_x/8  -- door atlas slot
+          local u=ov.ubase + ov.tex_x/8
           local v=atlas_ay + tex_pos/8
           if perp<zbuf[x] then zbuf[x]=perp end
           tline(x,ys, x,ye, u,v, 0, step_px/8)
@@ -859,14 +1024,13 @@ function draw_scene()
     end
   end
 
-  -- billboards (exit, enemies, projectiles)
+  draw_key_billboard(dirx,diry,planex,planey)
   draw_exit_billboard(dirx,diry,planex,planey)
   draw_enemies_billboards(dirx,diry,planex,planey)
   draw_projectiles(dirx,diry,planex,planey)
 end
 
--- ===== billboard helpers =====
--- 32x32 billboard; mode: 0=centered; y_offset_frac: add frac*h downward
+-- ===== billboards =====
 function draw_sprite32_billboard(tile_id, depth, screen_x, mode, y_off_frac)
   local s_tx=(tile_id%16)*8
   local s_ty=(tile_id\16)*8
@@ -875,11 +1039,10 @@ function draw_sprite32_billboard(tile_id, depth, screen_x, mode, y_off_frac)
   if w<1 or h<1 then return end
   local x0=flr(screen_x - w/2)
   local y0
-  if mode==1 then
-    y0 = 127 - h                      -- grounded
+  if mode==1 then y0 = 127 - h
   else
     local off=(y_off_frac or 0)*h
-    y0 = flr(half_h - h/2 + off)      -- centered + slight drop
+    y0 = flr(half_h - h/2 + off)
   end
   local x1=x0+w-1 if x1<0 or x0>127 then return end
   local xs=max(0,x0) local xe=min(127,x1)
@@ -899,8 +1062,19 @@ function draw_exit_billboard(dirx,diry,planex,planey)
   local ty=invdet*(-planey*rx + planex*ry)
   if ty>0 then
     local sx=flr((scr_w/2)*(1 + tx/ty))
-    -- draw slightly lower than centered (about 1/4 sprite height down)
-    draw_sprite32_billboard(EXIT_SPR,ty,sx,0,0.25)
+    draw_sprite32_billboard(EXIT_SPR,ty,sx,0,0.15)
+  end
+end
+
+function draw_key_billboard(dirx,diry,planex,planey)
+  if not key_ent or key_ent.got then return end
+  local invdet=1/(planex*diry - dirx*planey)
+  local rx=key_ent.x-player.x local ry=key_ent.y-player.y
+  local tx=invdet*( diry*rx - dirx*ry)
+  local ty=invdet*(-planey*rx + planex*ry)
+  if ty>0 then
+    local sx=flr((scr_w/2)*(1 + tx/ty))
+    draw_sprite32_billboard(KEY_SPR,ty,sx,0,0.10)
   end
 end
 
@@ -914,7 +1088,6 @@ function draw_enemies_billboards(dirx,diry,planex,planey)
     local ty=invdet*(-planey*rx + planex*ry)
     add(order,{i=i,ty=ty})
   end
-  -- sort far->near
   for a=1,#order do local bi=a for b=a+1,#order do if order[b].ty>order[bi].ty then bi=b end end if bi~=a then local t=order[a] order[a]=order[bi] order[bi]=t end end
   for k=1,#order do
     local e=enemies[order[k].i]
@@ -928,7 +1101,6 @@ function draw_enemies_billboards(dirx,diry,planex,planey)
   end
 end
 
--- small circle projectiles (screen-space), with coarse z test
 function draw_projectiles(dirx,diry,planex,planey)
   local invdet=1/(planex*diry - dirx*planey)
   for pr in all(projectiles) do
@@ -938,8 +1110,8 @@ function draw_projectiles(dirx,diry,planex,planey)
     if ty>0 then
       local h=flr(scr_h/ty)
       local cx=flr((scr_w/2)*(1 + tx/ty))
-      local r=max(1,h\8)      -- small radius
-      local cy=half_h         -- mid-height
+      local r=max(1,h\8)
+      local cy=half_h
       if cx>=0 and cx<=127 and ty<zbuf[cx] then
         circfill(cx,cy,r,(pr.from==1) and col_proj_pl or col_proj_en)
       end
@@ -951,6 +1123,7 @@ end
 function draw_hud()
   local s="hp: " for i=1,3 do s..=(i<=player.hp and "\143" or "\151") end
   print(s, 2,2, player.hurt_cd>0 and col_hitfx or 7)
+  if player.has_key then print("key", 2,10,11) end
   print("FPS: "..stat(7), 80,100,7)
   print("CPU: "..stat(1), 80,108,7)
 end
