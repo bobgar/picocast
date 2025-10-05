@@ -1,4 +1,4 @@
--- shared helpers (DRY)
+-- shared helpers (DRY + token-lean)
 
 DIRS={{1,0},{-1,0},{0,1},{0,-1}}
 
@@ -20,10 +20,7 @@ end
 
 function solid_cell(ix,iy)
  local t=cell(ix,iy)
- if t==DOOR_CODE or t==LOCKED_DOOR_CODE then
-  local d=door_at(ix,iy)
-  if d and d.anim>=1 then return false end
- end
+ if t==DOOR_CODE or t==LOCKED_DOOR_CODE then local d=door_at(ix,iy) if d and d.anim>=1 then return false end end
  return t>0
 end
 
@@ -38,27 +35,25 @@ end
 
 function passable_ai(ix,iy)
  local t=cell(ix,iy)
- if t==0 then return true end
- if t==DOOR_CODE then return true end
- return false
+ return (t==0) or (t==DOOR_CODE)
 end
 
 -- collisions (circle vs grid)
 function resolve_circle(x,y,r)
- local px,py=x,y
+ local px,py=x,y local r2=r*r
  local ix,iy=flr(px)+1, flr(py)+1
  for j=iy-1,iy+1 do
   for i=ix-1,ix+1 do
    if solid_cell(i,j) then
     local minx,maxx=i-1,i local miny,maxy=j-1,j
-    local qx=mid(minx,px,maxx) local qy=mid(miny,py,maxy)
+    local qx, qy = mid(minx,px,maxx), mid(miny,py,maxy)
     local dx,dy=px-qx,py-qy local d2=dx*dx+dy*dy
-    if d2<r*r-0.0001 then
+    if d2<r2-0.0001 then
       if dx==0 and dy==0 then
         local l=px-minx local rgt=maxx-px local t=py-miny local b=maxy-py
         if min(l,rgt)<min(t,b) then px+=(l<rgt) and (-(r-l)) or (r-rgt) else py+=(t<b) and (-(r-t)) or (r-b) end
       else
-        local d=sqrt(d2) local push=(r-d)/max(0.0001,d) px+=dx*push py+=dy*push
+        local d=sqrt(d2) local k=(r-d)/max(0.0001,d) px+=dx*k py+=dy*k
       end
     end
    end
@@ -73,12 +68,14 @@ function move_circle(x,y,dx,dy,r)
  for i=1,steps do x+=dx y+=dy x,y=resolve_circle(x,y,r) end
  local ix,iy=flr(x)+1,flr(y)+1
  if solid_cell(ix,iy) then
-  for rr=1,6 do for dy=-rr,rr do for dx=-rr,rr do
-   local nx,ny=ix+dx,iy+dy
-   if nx>=1 and ny>=1 and nx<=W and ny<=H and not solid_cell(nx,ny) then
-    return cell_center_world(nx),cell_center_world(ny)
-   end
-  end end end
+  for rr=1,6 do
+   for oy=-rr,rr do for ox=-rr,rr do
+    local nx,ny=ix+ox,iy+oy
+    if nx>=1 and ny>=1 and nx<=W and ny<=H and not solid_cell(nx,ny) then
+     return cell_center_world(nx),cell_center_world(ny)
+    end
+   end end
+  end
  end
  return x,y
 end
@@ -92,9 +89,9 @@ function los_dda(ax,ay,bx,by,limit)
  local stepx,stepy,sdx,sdy
  if rdx<0 then stepx=-1 sdx=(ax-mapx)*ddx else stepx=1 sdx=(mapx+1-ax)*ddx end
  if rdy<0 then stepy=-1 sdy=(ay-mapy)*ddy else stepy=1 sdy=(mapy+1-ay)*ddy end
- local guard=0 local lim=limit or 256
- while guard<lim do
-  guard+=1
+ local g=0 local lim=limit or 256
+ while g<lim do
+  g+=1
   if sdx<sdy then sdx+=ddx mapx+=stepx else sdy+=ddy mapy+=stepy end
   local ix,iy=mapx+1,mapy+1 local t=cell(ix,iy)
   if t>0 then
@@ -106,23 +103,19 @@ function los_dda(ax,ay,bx,by,limit)
  return true
 end
 
--- A* (bounded)
+-- A* (bounded)  — kept compact; agents rely on it
 function astar(sx,sy,tx,ty,rad,max_iter)
  rad=rad or 100 max_iter=max_iter or 6000
  local minx=max(1,min(sx,tx)-rad) local maxx=min(W,max(sx,tx)+rad)
  local miny=max(1,min(sy,ty)-rad) local maxy=min(H,max(sy,ty)+rad)
  local w,h=maxx-minx+1, maxy-miny+1
  local function inb(x,y) return x>=minx and y>=miny and x<=maxx and y<=maxy end
- if not inb(tx,ty) or not inb(sx,sy) then return nil end
+ if not inb(tx,ty) or not inb(sx,sy) then return end
  local function lx(x) return x-minx+1 end local function ly(y) return y-miny+1 end
  local g,px,py,closed,open={}, {}, {}, {}, {}
- for j=1,h do
-  g[j]={} px[j]={} py[j]={} closed[j]={}
-  for i=1,w do g[j][i]=30000 px[j][i]=0 py[j][i]=0 closed[j][i]=false end
- end
+ for j=1,h do g[j]={} px[j]={} py[j]={} closed[j]={} for i=1,w do g[j][i]=30000 px[j][i]=0 py[j][i]=0 closed[j][i]=false end end
  local ox,oy=lx(sx),ly(sy) local txl,tyl=lx(tx),ly(ty) g[oy][ox]=0
- add(open,{x=ox,y=oy,g=0,f=abs(ox-txl)+abs(oy-tyl)})
- local it=0
+ add(open,{x=ox,y=oy,g=0,f=abs(ox-txl)+abs(oy-tyl)}) local it=0
  while #open>0 and it<max_iter do
   it+=1
   local bi=1 for i=2,#open do if open[i].f<open[bi].f then bi=i end end
@@ -152,7 +145,6 @@ function astar(sx,sy,tx,ty,rad,max_iter)
    end
   end
  end
- return nil
 end
 
 -- doors api
@@ -163,17 +155,17 @@ function open_door_tile(ix,iy,allow_locked)
 end
 
 function try_open_door_at(x,y,require_key)
- local best_i=-1 local best_d=30000
+ local bi=-1 local bd=30000
  for i=1,#doors do
   local d=doors[i]
   if not d.removed and (not d.open or d.anim<1) then
    local wx,wy=cell_center_world(d.x),cell_center_world(d.y)
    local dd=dist(wx,wy,x,y)
-   if dd<USE_RADIUS and dd<best_d then best_d=dd best_i=i end
+   if dd<USE_RADIUS and dd<bd then bd=dd bi=i end
   end
  end
- if best_i==-1 then return false end
- local d=doors[best_i]
+ if bi==-1 then return false end
+ local d=doors[bi]
  if d.locked and require_key and not player.has_key then return false end
  d.open=true d.timer=DOOR_OPEN_TIME return true
 end
@@ -181,20 +173,18 @@ end
 function update_doors()
  local step=1/DOOR_ANIM_FRAMES
  for d in all(doors) do
-  if d.removed then
-  elseif d.open then
-   if d.anim<1 then d.anim=min(1,d.anim+step) end
-   if d.timer>0 then d.timer-=1 end
-   if d.timer<=0 then
-    local wx,wy=cell_center_world(d.x),cell_center_world(d.y)
-    if dist(wx,wy,player.x,player.y)>0.45 then
-     local clear=true
-     for e in all(enemies) do if dist(wx,wy,e.x,e.y)<0.45 then clear=false break end end
-     if clear then d.open=false end
+  if not d.removed then
+   if d.open then
+    if d.anim<1 then d.anim=min(1,d.anim+step) end
+    if d.timer>0 then d.timer-=1 end
+    if d.timer<=0 then
+     local wx,wy=cell_center_world(d.x),cell_center_world(d.y)
+     if dist(wx,wy,player.x,player.y)>0.45 then
+      local ok=true for e in all(enemies) do if dist(wx,wy,e.x,e.y)<0.45 then ok=false break end end
+      if ok then d.open=false end
+     end
     end
-   end
-  else
-   if d.anim>0 then d.anim=max(0,d.anim-step) end
+   elseif d.anim>0 then d.anim=max(0,d.anim-step) end
   end
  end
 end
@@ -203,23 +193,19 @@ end
 function build_atlas_from_sources(srcs)
  for i=1,#srcs do
   local src=srcs[i] local sc,sr=src%16,src\16 local ax=(i-1)*span
-  for ty=0,span-1 do
-   for tx=0,span-1 do
-    mset(ax+tx,atlas_ay+ty,(sr+ty)*16+(sc+tx))
-   end
-  end
+  for ty=0,span-1 do for tx=0,span-1 do mset(ax+tx,atlas_ay+ty,(sr+ty)*16+(sc+tx)) end end
  end
 end
 
 -- ray helper: 32px texcoord for current hit
-function tex_x32(side,mapx,mapy,stepx,stepy,rdx,rdy,px,py)
+function tex_x32(side,mx,my,sx,sy,rdx,rdy,px,py)
  local wx
  if side==0 then
-  local dx=(mapx-px+(1-stepx)/2)
+  local dx=(mx-px+(1-sx)/2)
   local hy=py + dx*(rdy/(rdx==0 and 0.0001 or rdx))
   wx=hy-flr(hy)
  else
-  local dy=(mapy-py+(1-stepy)/2)
+  local dy=(my-py+(1-sy)/2)
   local hx=px + dy*(rdx/(rdy==0 and 0.0001 or rdy))
   wx=hx-flr(hx)
  end
@@ -228,18 +214,57 @@ function tex_x32(side,mapx,mapy,stepx,stepy,rdx,rdy,px,py)
  return mid(0,tx,tex_w-1)
 end
 
--- billboard
-function draw_sprite32_billboard(tile_id,depth,screen_x,mode,y_off_frac)
+-- billboard (uses global zb from render.lua)
+function draw_sprite32_billboard(tile_id,depth,cx,mode,yoff)
  local s_tx=(tile_id%16)*8 local s_ty=(tile_id\16)*8
  local h=flr(scr_h/depth) local w=h if w<1 or h<1 then return end
- local x0=flr(screen_x-w/2)
- local y0=(mode==1) and (127-h) or flr(half_h-h/2+(y_off_frac or 0)*h)
+ local x0=flr(cx-w/2)
+ local y0=(mode==1) and (127-h) or flr(half_h-h/2+(yoff or 0)*h)
  local x1=x0+w-1 if x1<0 or x0>127 then return end
  local xs=max(0,x0) local xe=min(127,x1)
  for x=xs,xe do
-  if depth<zbuf[x] then
+  if depth<zb[x] then
    local u=flr((x-x0)*32/w)
    sspr(s_tx+u,s_ty,1,32,x,y0,1,h)
   end
  end
+end
+
+
+
+local function convert(n)  
+    if n == 0 then 
+        return " " 
+    elseif n == DOOR_CODE then 
+        return "D" 
+    elseif n==LOCKED_DOOR_CODE then 
+        return "L" 
+    else 
+        return "X"  
+    end  
+end
+
+-- dumps the grid; if mark_player=true, marks the player's tile as "PP"
+function debug_dump_level(mark_player)
+  printh("=== level dump ===")
+  local px,py = flr(player.x+0.5), flr(player.y+0.5)
+
+  for y=1,H do
+    local row=""
+    for x=1,W do
+      local cellstr
+      if mark_player and x==px and y==py then
+        cellstr="P"
+      elseif exit_ix == x and exit_iy == y then
+        cellstr="S"
+      elseif flr(key_ent.x) ==x and flr(key_ent.y) == y then
+        cellstr="K"
+      else
+        local v=cell(x,y)
+        cellstr=convert(v)
+      end
+      row..=cellstr
+    end
+    printh(row)
+  end    
 end

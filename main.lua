@@ -21,7 +21,7 @@ function _update60()
  if btn(0) then player.a-=rot_spd end if btn(1) then player.a+=rot_spd end
  if player.a<0 then player.a+=1 end if player.a>=1 then player.a-=1 end
  if btnp(5) then player_fire() end
- if btnp(4) then try_open_door_at(player.x,player.y,true) end
+ if btnp(4) then debug_dump_level(true) try_open_door_at(player.x,player.y,true) end
 
  local dx,dy=0,0 local cx,cy=cos(player.a),sin(player.a)
  if btn(2) then dx+=cx*move_spd dy+=cy*move_spd end
