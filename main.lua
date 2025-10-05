@@ -77,6 +77,6 @@ function _draw()
   for i=1,player.hp do spr(13, i*10,5) end
   --print(s,2,2, player.hurt_cd>0 and 8 or 7)
   if player.has_key then spr(14,10,15) end --print("key",2,10,11) end
-  print("fps:" .. stat(7) .. "\ncpu:" .. stat(1) ,80,100,7)
+  --print("fps:" .. stat(7) .. "\ncpu:" .. stat(1) ,80,100,7)
  end
 end
