@@ -76,56 +76,56 @@ function draw_scene()
   end
  end
 
- -- cheap projector
+  -- cheap projector
  local inv=1/(px*dy - dx*py)
  local function pr(wx,wy)
   local rx,ry=wx-player.x,wy-player.y
-  local tx=inv*(dy*rx - dx*ry)
-  local ty=inv*(-py*rx + px*ry)
-  return tx,ty
+  return inv*(dy*rx - dx*ry), inv*(-py*rx + px*ry) -- tx,ty
  end
+
+ -- gather billboards
+ local sp={}
 
  -- key
  if key_ent and not key_ent.got then
   local tx,ty=pr(key_ent.x,key_ent.y)
-  if ty>0 then
-   local cx=flr((scr_w/2)*(1+tx/ty))
-   if cx>=0 and cx<scr_w and ty<zb[cx] then
-    draw_sprite32_billboard(KEY_SPR,ty,cx,0,0.10)
-   end
-  end
+  if ty>0 then add(sp,{spr=KEY_SPR,tx=tx,ty=ty,off=0.10}) end
  end
 
  -- exit
  do
   local ex,ey=cell_center_world(exit_ix),cell_center_world(exit_iy)
   local tx,ty=pr(ex,ey)
-  if ty>0 then
-   local cx=flr((scr_w/2)*(1+tx/ty))
-   if cx>=0 and cx<scr_w and ty<zb[cx] then
-    draw_sprite32_billboard(EXIT_SPR,ty,cx,0,0.15)
-   end
+  if ty>0 then add(sp,{spr=EXIT_SPR,tx=tx,ty=ty,off=0.15}) end
+ end
+
+ -- healths
+ for h in all(healths) do
+  if not h.got then
+   local tx,ty=pr(h.x,h.y)
+   if ty>0 then add(sp,{spr=HEALTH_SPR,tx=tx,ty=ty,off=0}) end
   end
  end
 
- for h in all(healths) do
-    local tx,ty=pr(h.x,h.y)
-    if ty>0 then
-      local cx=flr((scr_w/2)*(1+tx/ty))
-      if cx>=0 and cx<scr_w and ty<zb[cx] then
-        draw_sprite32_billboard(HEALTH_SPR,ty,cx,0,0.10)
-      end
-    end
- end
-
- -- enemies (no sort; z-cull at center column)
+ -- enemies
  for e in all(enemies) do
   local tx,ty=pr(e.x,e.y)
-  if ty>0 then
-   local cx=flr((scr_w/2)*(1+tx/ty))
-   if cx>=0 and cx<scr_w and ty<zb[cx] then
-    draw_sprite32_billboard((e.t==0) and SPR_MELEE or SPR_RANGED, ty, cx,0,0)
-   end
+  if ty>0 then add(sp,{spr=(e.t==0) and SPR_MELEE or SPR_RANGED,tx=tx,ty=ty,off=0}) end
+ end
+
+ -- depth sort (far -> near)
+ for a=1,#sp do
+  local bi=a
+  for b=a+1,#sp do if sp[b].ty>sp[bi].ty then bi=b end end
+  if bi~=a then local t=sp[a] sp[a]=sp[bi] sp[bi]=t end
+ end
+
+ -- draw sorted (z-cull vs walls)
+ for i=1,#sp do
+  local s=sp[i]
+  local cx=flr((scr_w/2)*(1+s.tx/s.ty))
+  if cx>=0 and cx<scr_w and s.ty<zb[cx] then
+   draw_sprite32_billboard(s.spr,s.ty,cx,0,s.off)
   end
  end
 
