@@ -3,24 +3,16 @@ scr_w,scr_h=128,128
 half_h=64
 BIG=32767
 
--- fov/movement
-fov_deg=60
-fov_turn=fov_deg/360
+-- fov/movement (60° => 1/6; 2.7/360 => 0.0075)
+fov_turn=1/6
 move_spd=0.135
-rot_spd=2.7/360
+rot_spd=0.0075
 
--- textures: 32x32 packed into map (4x4 sprite tiles)
+-- textures: 32x32 packed (4x4 sprites)
 tex_w,tex_h=32,32
-span=tex_w/8
+span=4
 
--- wall sources (sprite 0 is blank)
-WALL_SRC0=1
-WALL_SRC1=1+span
-WALL_SRC2=1+span*2
-
--- doors (32x32), exit, key
-DOOR_SRC=64
-LOCKED_DOOR_SRC=76
+-- doors/exits/keys (sprites)
 EXIT_SPR=68
 KEY_SPR=72
 
@@ -31,15 +23,15 @@ atlas_ay=0
 DOOR_CODE=9
 LOCKED_DOOR_CODE=10
 DOOR_OPEN_TIME=420
-USE_RADIUS=1.0
+USE_RADIUS=1
 DOOR_ANIM_FRAMES=30
 
 -- palette
-col_sky=12
-col_floor=3
+col_ceil=5
+col_floor=13
 col_proj_en=8
 col_proj_pl=10
-col_hitfx=8
+-- col_hitfx removed (unused); add back if you use it
 
 -- world, player, state
 W,H=200,200
@@ -58,7 +50,17 @@ key_ent=nil
 enemies={}
 projectiles={}
 SPR_MELEE=128
-SPR_RANGED=128+4
+SPR_RANGED=132
 
 -- perf
 plan_budget=1
+
+-- keep these so the atlas builds (render expects 0..2 = walls, 3 = door, 4 = locked)
+WALL_SRC0=1
+WALL_SRC1=1+span
+WALL_SRC2=1+span*2
+DOOR_SRC=64
+LOCKED_DOOR_SRC=76
+
+HEALTH_SPR=136
+healths={}

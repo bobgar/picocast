@@ -8,7 +8,7 @@ function draw_scene()
  local t=sin(hf)/max(0.0001,cos(hf))
  local px,py=-dy*t,dx*t
 
- rectfill(0,0,127,63,col_sky) rectfill(0,64,127,127,col_floor)
+ rectfill(0,0,127,63,col_ceil) rectfill(0,64,127,127,col_floor)
  dov={} local nc=0.03
 
  for x=0,scr_w-1 do
@@ -106,6 +106,16 @@ function draw_scene()
     draw_sprite32_billboard(EXIT_SPR,ty,cx,0,0.15)
    end
   end
+ end
+
+ for h in all(healths) do
+    local tx,ty=pr(h.x,h.y)
+    if ty>0 then
+      local cx=flr((scr_w/2)*(1+tx/ty))
+      if cx>=0 and cx<scr_w and ty<zb[cx] then
+        draw_sprite32_billboard(HEALTH_SPR,ty,cx,0,0.10)
+      end
+    end
  end
 
  -- enemies (no sort; z-cull at center column)

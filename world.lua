@@ -209,6 +209,20 @@ local function attempt()
  player.hp=3 player.hurt_cd=0 player.fire_cd=0 player.has_key=false
  local ex,ey=cxy(er) exit_ix,exit_iy=ex,ey
  key_ent={x=cell_center_world(kr.x+kr.w\2),y=cell_center_world(kr.y+kr.h\2),got=false}
+ -- place health pickups
+  healths={}
+  local n=irnd(3,4)
+  local pool={}
+  for i=1,#rooms do
+  local k=rooms[i].kind
+  if k=='normal' then add(pool,i) end
+  end
+  for i=1,n do
+  if #pool==0 then break end
+  local id=pool[irnd(1,#pool)]
+  local x,y=rndpos(rooms[id])
+  add(healths,{x=x,y=y})
+  end
 
  spawn_enemies() projectiles={}
  return true
