@@ -18,21 +18,22 @@ function _update60()
  player.hurt_cd=max(0,player.hurt_cd-1)
  player.fire_cd=max(0,player.fire_cd-1)
 
- -- rotate
+ -- fire / use
+if btnp(5) then player_fire() end
+if btnp(4) then try_open_door_at(player.x,player.y,true) end
+
+-- movement: hold 🅾️ to strafe with ←/→
+local cx,cy=cos(player.a),sin(player.a)
+local f=(btn(2) and 1 or 0)-(btn(3) and 1 or 0)                  -- forward/back
+local s=btn(4) and ((btn(1) and 1 or 0)-(btn(0) and 1 or 0)) or 0 -- strafe when holding 🅾️
+if not btn(4) then                                               -- otherwise turn
  if btn(0) then player.a-=rot_spd end
  if btn(1) then player.a+=rot_spd end
  player.a%=1
-
- -- fire / use
- if btnp(5) then player_fire() end
- if btnp(4) then try_open_door_at(player.x,player.y,true) end
-
- -- move (forward/back only; strafing not used)
- local f=(btn(2) and 1 or 0)-(btn(3) and 1 or 0)
- if f~=0 then
-  local cx,cy=cos(player.a),sin(player.a)
-  player.x,player.y=move_circle(player.x,player.y,cx*move_spd*f,cy*move_spd*f,0.18)
- end
+end
+local dx=cx*move_spd*f + cy*move_spd*s
+local dy=cy*move_spd*f - cx*move_spd*s
+if dx~=0 or dy~=0 then player.x,player.y=move_circle(player.x,player.y,dx,dy,0.18) end
 
  -- key pickup
  if key_ent and not key_ent.got and dist(player.x,player.y,key_ent.x,key_ent.y)<0.45 then
